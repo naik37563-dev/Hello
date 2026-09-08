@@ -1,0 +1,213 @@
+;;;=====================================================================
+;;; ISO-AUTOMATION.LSP
+;;; Tools to convert FLATSHOT output into a colored pipe isometric:
+;;;   - Pipe geometry  -> layer PIPE-ISO  (green, color 3)
+;;;   - Equipment      -> layer EQUIP-ISO (pink/magenta, color 6)
+;;;   - Quick "NNN NB / XX BEND" leader tags on the correct layer
+;;;
+;;; Commands:
+;;;   FS-PIPE          - recolor selected flatshot pipe entities (no explode)
+;;;   FS-PIPE-EXPLODE  - explode flatshot block(s) then recolor to PIPE-ISO
+;;;   FS-EQUIP         - recolor selected flatshot equipment (no explode)
+;;;   FS-EQUIP-EXPLODE - explode flatshot equipment block(s) then recolor
+;;;   ISOTAG           - insert a leader + "size NB / angle BEND" text
+;;;   ISOTOOLS         - print this command list
+;;;=====================================================================
+
+(defun ensure-layer (lname color / )
+  (if (not (tblsearch "LAYER" lname))
+    (command "_.-layer" "_N" lname "_C" color lname "")
+  )
+)
+
+;; ---- PIPE (green) ----------------------------------------------------
+
+(defun c:FS-PIPE ( / ss)
+  (ensure-layer "PIPE-ISO" 3)
+  (princ "\nSelect flatshot PIPE geometry to recolor to PIPE-ISO (green): ")
+  (setq ss (ssget))
+  (if ss
+    (progn
+      (command "_.chprop" ss "" "_LA" "PIPE-ISO" "_C" "BYLAYER" "")
+      (princ "\nDone - entities moved to PIPE-ISO.")
+    )
+    (princ "\nNothing selected.")
+  )
+  (princ)
+)
+
+(defun c:FS-PIPE-EXPLODE ( / ss i)
+  (ensure-layer "PIPE-ISO" 3)
+  (princ "\nSelect flatshot BLOCK(S) (pipe) to explode + recolor to PIPE-ISO: ")
+  (setq ss (ssget '((0 . "INSERT"))))
+  (if ss
+    (progn
+      (setq i 0)
+      (repeat (sslength ss)
+        (command "_.explode" (ssname ss i))
+        (command "_.chprop" "_P" "" "_LA" "PIPE-ISO" "_C" "BYLAYER" "")
+        (setq i (1+ i))
+      )
+      (princ "\nDone.")
+    )
+    (princ "\nNo blocks selected.")
+  )
+  (princ)
+)
+
+;; ---- EQUIPMENT (pink/magenta) ----------------------------------------
+
+(defun c:FS-EQUIP ( / ss)
+  (ensure-layer "EQUIP-ISO" 6)
+  (princ "\nSelect flatshot EQUIPMENT geometry to recolor to EQUIP-ISO (pink): ")
+  (setq ss (ssget))
+  (if ss
+    (progn
+      (command "_.chprop" ss "" "_LA" "EQUIP-ISO" "_C" "BYLAYER" "")
+      (princ "\nDone - entities moved to EQUIP-ISO.")
+    )
+    (princ "\nNothing selected.")
+  )
+  (princ)
+)
+
+(defun c:FS-EQUIP-EXPLODE ( / ss i)
+  (ensure-layer "EQUIP-ISO" 6)
+  (princ "\nSelect flatshot BLOCK(S) (equipment) to explode + recolor to EQUIP-ISO: ")
+  (setq ss (ssget '((0 . "INSERT"))))
+  (if ss
+    (progn
+      (setq i 0)
+      (repeat (sslength ss)
+        (command "_.explode" (ssname ss i))
+        (command "_.chprop" "_P" "" "_LA" "EQUIP-ISO" "_C" "BYLAYER" "")
+        (setq i (1+ i))
+      )
+      (princ "\nDone.")
+    )
+    (princ "\nNo blocks selected.")
+  )
+  (princ)
+)
+
+;; ---- TRUE MATCH PROPERTIES (no explode) --------------------------------
+;; Pick a SOURCE object that already sits on the correct layer (PIPE-ISO or
+;; EQUIP-ISO), then pick the flatshot block(s) as destination. Works like
+;; the standard MATCHPROP command, but the layer is pre-checked/created.
+
+(defun c:FS-MATCH-PIPE ( / src dest)
+  (ensure-layer "PIPE-ISO" 3)
+  (princ "\nSelect SOURCE object already on PIPE-ISO (green): ")
+  (setq src (entsel))
+  (princ "\nSelect DESTINATION flatshot block(s) to match: ")
+  (setq dest (ssget))
+  (if (and src dest)
+    (progn
+      (command "_.matchprop" (car src) dest "")
+      (princ "\nDone - properties matched to PIPE-ISO.")
+    )
+    (princ "\nSelection incomplete - nothing changed.")
+  )
+  (princ)
+)
+
+(defun c:FS-MATCH-EQUIP ( / src dest)
+  (ensure-layer "EQUIP-ISO" 6)
+  (princ "\nSelect SOURCE object already on EQUIP-ISO (pink): ")
+  (setq src (entsel))
+  (princ "\nSelect DESTINATION flatshot block(s) to match: ")
+  (setq dest (ssget))
+  (if (and src dest)
+    (progn
+      (command "_.matchprop" (car src) dest "")
+      (princ "\nDone - properties matched to EQUIP-ISO.")
+    )
+    (princ "\nSelection incomplete - nothing changed.")
+  )
+  (princ)
+)
+
+;; ---- COMBINED EXPLODE + RECOLOR ---------------------------------------
+
+(defun c:FS-EXPLODE ( / typ lay col ss i)
+  (initget "Pipe Equipment")
+  (setq typ (getkword "\nExplode as [Pipe/Equipment] <Pipe>: "))
+  (if (not typ) (setq typ "Pipe"))
+  (if (= typ "Pipe")
+    (progn (setq lay "PIPE-ISO") (setq col 3))
+    (progn (setq lay "EQUIP-ISO") (setq col 6))
+  )
+  (ensure-layer lay col)
+  (princ (strcat "\nSelect flatshot BLOCK(S) to explode + recolor to " lay ": "))
+  (setq ss (ssget '((0 . "INSERT"))))
+  (if ss
+    (progn
+      (setq i 0)
+      (repeat (sslength ss)
+        (command "_.explode" (ssname ss i))
+        (command "_.chprop" "_P" "" "_LA" lay "_C" "BYLAYER" "")
+        (setq i (1+ i))
+      )
+      (princ (strcat "\nDone - exploded and moved to " lay "."))
+    )
+    (princ "\nNo blocks selected.")
+  )
+  (princ)
+)
+
+;; ---- NB SIZE / BEND TAG -----------------------------------------------
+
+(defun c:ISOTAG ( / typ lay sz bend txt1 txt2 p1 p2 oldclayer)
+  (setq oldclayer (getvar "CLAYER"))
+  (initget "Pipe Equipment")
+  (setq typ (getkword "\nTag type [Pipe/Equipment] <Pipe>: "))
+  (if (not typ) (setq typ "Pipe"))
+  (if (= typ "Pipe")
+    (setq lay "PIPE-ISO")
+    (setq lay "EQUIP-ISO")
+  )
+  (ensure-layer lay (if (= lay "PIPE-ISO") 3 6))
+
+  (setq sz (getstring "\nEnter pipe/nozzle size (e.g. 250): "))
+
+  (initget "Straight 45 90 Custom")
+  (setq bend (getkword "\nBend angle [Straight/45/90/Custom] <Straight>: "))
+  (if (not bend) (setq bend "Straight"))
+  (if (= bend "Custom")
+    (setq bend (getstring "\nEnter bend angle in degrees: "))
+  )
+
+  (setq txt1 (strcat sz " NB"))
+  (setq txt2 (if (= bend "Straight") "" (strcat bend (chr 176) " BEND")))
+
+  (princ "\nSpecify leader start point (arrow, at the pipe/fitting): ")
+  (setq p1 (getpoint))
+  (princ "\nSpecify text location: ")
+  (setq p2 (getpoint p1))
+
+  (setvar "CLAYER" lay)
+  (if (= txt2 "")
+    (command "_.leader" p1 p2 "" txt1 "")
+    (command "_.leader" p1 p2 "" txt1 txt2 "")
+  )
+  (setvar "CLAYER" oldclayer)
+  (princ)
+)
+
+;; ---- HELP ---------------------------------------------------------------
+
+(defun c:ISOTOOLS ()
+  (princ "\n--- ISO AUTOMATION COMMANDS ---")
+  (princ "\nFS-PIPE          : recolor selected flatshot pipe entities -> PIPE-ISO (green), no explode")
+  (princ "\nFS-EQUIP         : recolor selected flatshot equipment -> EQUIP-ISO (pink), no explode")
+  (princ "\nFS-MATCH-PIPE    : pick a green source object, match its properties onto flatshot pipe block(s)")
+  (princ "\nFS-MATCH-EQUIP   : pick a pink source object, match its properties onto flatshot equipment block(s)")
+  (princ "\nFS-PIPE-EXPLODE  : explode flatshot pipe block(s) then recolor -> PIPE-ISO")
+  (princ "\nFS-EQUIP-EXPLODE : explode flatshot equipment block(s) then recolor -> EQUIP-ISO")
+  (princ "\nFS-EXPLODE       : one command - asks Pipe/Equipment, then explode + recolor")
+  (princ "\nISOTAG           : insert leader with 'size NB' / 'angle BEND' text")
+  (princ)
+)
+
+(princ "\nISO-AUTOMATION.LSP loaded. Type ISOTOOLS for command list.")
+(princ)
