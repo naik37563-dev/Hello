@@ -1,5 +1,5 @@
-$source = D:\WRENCH LOTS RELEASE\WRENCH LOT 18 SHARAYU 284 WORKING
-$destination = D:\WRENCH LOTS RELEASE\WRENCH LOT 18 SHARAYU 284 WORKING
+$source =D:\WRENCH LOTS RELEASE\WRENCH LOT 18 SHARAYU 284 WORKING
+$destination =D:\WRENCH LOTS RELEASE\WRENCH LOT 18 SHARAYU 284 WORKING
 
 Get-ChildItem -Path $source -File | ForEach-Object {
     if ($_.Name -match "^(.*?)(_R\d+_.*)$") {
