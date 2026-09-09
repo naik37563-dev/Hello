@@ -1,4 +1,4 @@
-$folder = "D:\WRENCH LOTS RELEASE\WRENCH LOT 18 SHARAYU 284 WORKING"
+$folder = "D:\WRENCH LOTS RELEASE\wrench LOT-19 226 WORKING"
 
 Get-ChildItem -Path $folder -File | ForEach-Object {
     if ($_.Name -like "*-R*") {
