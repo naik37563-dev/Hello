@@ -1,0 +1,11 @@
+$source = "C:\SourceFolder"
+$destination = "C:\DestinationFolder"
+
+Get-ChildItem -Path $source -File | ForEach-Object {
+    if ($_.Name -match "^(.*?)(_R\d+_.*)$") {
+        $newName = $matches[1] + $_.Extension
+    } else {
+        $newName = $_.Name
+    }
+    Copy-Item -Path $_.FullName -Destination (Join-Path $destination $newName)
+}
