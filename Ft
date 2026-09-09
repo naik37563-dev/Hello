@@ -1,0 +1,41 @@
+;;;=====================================================================
+;;; ISO-AUTOMATION.LSP
+(vl-load-com)
+;;; Tools to convert FLATSHOT output into a colored pipe isometric:
+;;;   - Pipe geometry  -> layer PIPE-ISO  (green, color 3)
+;;;   - Equipment      -> layer EQUIP-ISO (pink/magenta, color 6)
+;;;   - Quick "NNN NB / XX BEND" leader tags on the correct layer
+;;;=====================================================================
+
+(defun ensure-layer (lname color / )
+  (if (not (tblsearch "LAYER" lname))
+    (command "_.-layer" "_N" lname "_C" color lname "")
+  )
+)
+
+;; Sets Layer + Color + Linetype + Lineweight all to BYLAYER in one shot,
+;; so the object's full properties come from the layer definition (not
+;; just its color) - this is what "accurate properties" means here.
+(defun set-full-props (ss lay)
+  (command "_.chprop" ss "" "_LA" lay "_C" "BYLAYER" "_LT" "BYLAYER" "_LW" "BYLAYER" "")
+)
+
+;; ---- PIPE (green) ----------------------------------------------------
+
+(defun c:FS-PIPE ( / ss)
+  (ensure-layer "PIPE-ISO" 3)
+  (princ "\nSelect flatshot PIPE geometry to recolor to PIPE-ISO (green): ")
+  (setq ss (ssget))
+  (if ss
+    (progn
+      (command "_.chprop" ss "" "_LA" "PIPE-ISO" "_C" "BYLAYER" "_LT" "BYLAYER" "_LW" "BYLAYER" "")
+      (princ "\nDone - entities moved to PIPE-ISO.")
+    )
+    (princ "\nNothing selected.")
+  )
+  (princ)
+)
+
+(defun c:FS-PIPE-EXPLODE ( / ss i)
+  (ensure-layer "PIPE-ISO" 3)
+  (princ "\nSelect flatshot BLOCK(S) (pipe) to explode + recolor
