@@ -1,0 +1,92 @@
+(defun c:AUTOBATCHPDF ( / ss i ent obj minpt maxpt p1 p2 dwgname pdfname counter layerName shell folder targetFolder)
+  (vl-load-com)
+  
+  ;; 1. Prompt user to select an output folder using Windows Shell
+  (setq shell (vlax-create-object "Shell.Application"))
+  (setq folder (vlax-invoke-method shell 'BrowseForFolder 0 "Select Folder to Save PDFs" 0))
+  
+  (if folder
+    (progn
+      (setq targetFolder (vlax-get-property (vlax-get-property folder 'Self) 'Path))
+      (vlax-release-object folder)
+      (vlax-release-object shell)
+      
+      ;; Add trailing backslash if missing
+      (if (not (eq (substr targetFolder (strlen targetFolder)) "\\"))
+        (setq targetFolder (strcat targetFolder "\\"))
+      )
+      
+      (setq dwgname (vl-filename-base (getvar "DWGNAME")))
+      (setq layerName "PDF_BOUNDARIES")
+
+      ;; Ensure boundary layer exists
+      (if (null (tblsearch "LAYER" layerName))
+        (command "-LAYER" "M" layerName "C" "2" "" "")
+      )
+      
+      (princ "\nSelect all drawing blocks/sheets to frame and plot: ")
+      (setq ss (ssget))
+      
+      (if ss
+        (progn
+          (setq counter 1)
+          (setvar "CMDECHO" 0)
+          
+          (repeat (sslength ss)
+            (setq ent (ssname ss (setq i (if i (1+ i) 0))))
+            (setq obj (vlax-ename->vla-object ent))
+            
+            ;; Get bounding box
+            (vla-getboundingbox obj 'minpt 'maxpt)
+            (setq p1 (vlax-safearray->list minpt))
+            (setq p2 (vlax-safearray->list maxpt))
+            
+            ;; Draw rectangle
+            (setvar "CLAYER" layerName)
+            (command "._rectangle" p1 p2)
+            
+            ;; Format coordinates
+            (setq p1str (strcat (rtos (car p1) 2 4) "," (rtos (cadr p1) 2 4)))
+            (setq p2str (strcat (rtos (car p2) 2 4) "," (rtos (cadr p2) 2 4)))
+            
+            ;; Construct destination path with selected folder
+            (setq pdfname (strcat targetFolder dwgname "_Sheet_" (itoa counter) ".pdf"))
+            
+            ;; Plot command
+            (command "-PLOT"
+                     "Yes"                         ;; Detailed plot configuration?
+                     "Model"                       ;; Layout name
+                     "DWG To PDF.pc3"              ;; Output device
+                     "ISO A1 (594.00 x 841.00 MM)" ;; Paper size
+                     "Millimeters"                 ;; Paper units
+                     "Landscape"                   ;; Drawing orientation
+                     "No"                          ;; Plot upside down?
+                     "Window"                      ;; Plot area type
+                     p1str                         ;; First corner of window
+                     p2str                         ;; Second corner of window
+                     "Fit"                         ;; Plot scale
+                     "Center"                      ;; Plot offset
+                     "Yes"                         ;; Plot with plot styles?
+                     "monochrome.ctb"              ;; Plot style table name
+                     "Yes"                         ;; Plot with lineweights?
+                     "As displayed"                ;; Shaded viewport options
+                     pdfname                       ;; Destination path
+                     "No"                          ;; Save changes to page setup?
+                     "Yes"                         ;; Proceed with plot?
+            )
+            
+            (setq counter (1+ counter))
+          )
+          (setvar "CMDECHO" 1)
+          (princ (strcat "\nDone! All PDFs saved to: " targetFolder))
+        )
+        (princ "\nNo objects selected.")
+      )
+    )
+    (progn
+      (vlax-release-object shell)
+      (princ "\nFolder selection canceled.")
+    )
+  )
+  (princ)
+)
