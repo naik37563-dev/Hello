@@ -1,0 +1,8 @@
+$folder = "D:\WRENCH LOTS RELEASE\WRENCH LOT 18 SHARAYU 284 WORKING"
+
+Get-ChildItem -Path $folder -File | ForEach-Object {
+    if ($_.Name -match "^(.*?)(-R\d+-.*)$") {
+        $newName = $matches[1] + $_.Extension
+        Rename-Item -Path $_.FullName -NewName $newName
+    }
+}
