@@ -1,0 +1,10 @@
+;;;=========================================================================
+;;; PipeAnno.lsp
+;;; Semi-automatic annotation for pipe routing drawings:
+;;;   PCL    - draw centerline over a selected pipe line
+;;;   PDIM   - place a linear dimension along a selected pipe line
+;;;   PSIZE  - place a leader + blank text ("     NB") for manual size entry
+;;;   PBEND  - place a leader + blank text ("     BEND") for bend angle
+;;;   PANNO  - runs PCL + PDIM + PSIZE on one selected line (fewest steps)
+;;;
+;;; !! EDIT THE CONFIG BLOCK BELOW FI
