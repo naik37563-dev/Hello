@@ -1,0 +1,227 @@
+;;;=========================================================================
+;;; PipeAnno.lsp
+;;; Semi-automatic annotation for pipe routing drawings:
+;;;   PCL    - draw centerline over a selected pipe line
+;;;   PDIM   - place a linear dimension along a selected pipe line
+;;;   PSIZE  - place a leader + blank text ("     NB") for manual size entry
+;;;   PBEND  - place a leader + blank text ("     BEND") for bend angle
+;;;   PANNO  - runs PCL + PDIM + PSIZE on one selected line (fewest steps)
+;;;
+;;; !! EDIT THE CONFIG BLOCK BELOW FIRST !!
+;;; These values must match YOUR drawing standard exactly (layers, dimstyle,
+;;; text height, leader arrow size, centerline extension). Defaults below
+;;; are guesses based on your screenshot and will not be exact until you
+;;; set them.
+;;;=========================================================================
+
+;; ----------------------- CONFIG (edit these) ---------------------------
+(setq *CL-LAYER*      "CENTERLINE")   ; layer for centerlines
+(setq *DIM-LAYER*     "DIMENSIONS")   ; layer for dimensions
+(setq *LEADER-LAYER*  "PIPE-SIZE")    ; layer for leaders
+(setq *TEXT-LAYER*    "PIPE-SIZE")    ; layer for leader text
+
+(setq *DIMSTYLE*      "ISO-25")       ; your dimstyle name (must already exist
+                                       ; in the drawing, or this is skipped)
+
+(setq *TEXT-HEIGHT*   150.0)          ; leader text height (drawing units)
+(setq *CL-EXTEND*     50.0)           ; centerline overshoot past each pipe end
+(setq *CL-LTSCALE*    50.0)           ; linetype scale for centerline layer
+
+(setq *SIZE-TEXT*     "     NB")      ; blank placeholder for pipe size
+(setq *BEND-TEXT*     "     BEND")    ; blank placeholder for bend angle
+;; -------------------------------------------------------------------------
+
+(defun ensure-layer (name / )
+  (if (not (tblsearch "LAYER" name))
+    (command "_.-layer" "_n" name "")
+  )
+)
+
+(defun ensure-cl-layer ( / )
+  (if (not (tblsearch "LTYPE" "CENTER2"))
+    (command "_.-linetype" "_load" "CENTER2" "acad.lin" "")
+  )
+  (if (not (tblsearch "LAYER" *CL-LAYER*))
+    (command "_.-layer" "_n" *CL-LAYER* "_c" "1" *CL-LAYER*
+                        "_lt" "CENTER2" *CL-LAYER*
+                        "_lw" "0.13" *CL-LAYER* "")
+  )
+)
+
+(defun get-endpoints (ent / elist p1 p2)
+  ;; returns (p1 p2) for a simple LINE entity, else nil
+  (setq elist (entget ent))
+  (if (= (cdr (assoc 0 elist)) "LINE")
+    (list (cdr (assoc 10 elist)) (cdr (assoc 11 elist)))
+    nil
+  )
+)
+
+;;;-------------------------------------------------------------------------
+;;; PCL - draw a centerline over the selected pipe line
+;;;-------------------------------------------------------------------------
+(defun c:PCL (/ ent pts p1 p2 vec len uvec ep1 ep2 oldlayer oldlts)
+  (setvar "cmdecho" 0)
+  (setq ent (car (entsel "\nSelect pipe line for centerline: ")))
+  (if ent
+    (progn
+      (setq pts (get-endpoints ent))
+      (if pts
+        (progn
+          (setq p1 (car pts) p2 (cadr pts))
+          (setq len (distance p1 p2))
+          (setq vec (mapcar '- p2 p1))
+          (setq uvec (mapcar '(lambda (x) (/ x len)) vec))
+          (setq ep1 (mapcar '- p1 (mapcar '(lambda (x) (* x *CL-EXTEND*)) uvec)))
+          (setq ep2 (mapcar '+ p2 (mapcar '(lambda (x) (* x *CL-EXTEND*)) uvec)))
+          (ensure-cl-layer)
+          (setq oldlayer (getvar "clayer"))
+          (setq oldlts (getvar "ltscale"))
+          (setvar "clayer" *CL-LAYER*)
+          (setvar "ltscale" *CL-LTSCALE*)
+          (command "_.line" ep1 ep2 "")
+          (setvar "clayer" oldlayer)
+          (setvar "ltscale" oldlts)
+        )
+        (princ "\n>> Select a simple LINE entity (not a polyline).")
+      )
+    )
+    (princ "\nNo object selected.")
+  )
+  (princ)
+)
+
+;;;-------------------------------------------------------------------------
+;;; PDIM - linear dimension along the selected pipe line
+;;;-------------------------------------------------------------------------
+(defun c:PDIM (/ ent pts p1 p2 oldlayer oldstyle)
+  (setvar "cmdecho" 0)
+  (setq ent (car (entsel "\nSelect pipe line to dimension: ")))
+  (if ent
+    (progn
+      (setq pts (get-endpoints ent))
+      (if pts
+        (progn
+          (setq p1 (car pts) p2 (cadr pts))
+          (ensure-layer *DIM-LAYER*)
+          (setq oldlayer (getvar "clayer"))
+          (setq oldstyle (getvar "dimstyle"))
+          (setvar "clayer" *DIM-LAYER*)
+          (if (tblsearch "DIMSTYLE" *DIMSTYLE*)
+            (setvar "dimstyle" *DIMSTYLE*)
+            (princ (strcat "\n>> Dimstyle \"" *DIMSTYLE* "\" not found, using current."))
+          )
+          (princ "\nPick dimension line location: ")
+          (command "_.dimlinear" p1 p2 pause)
+          (setvar "clayer" oldlayer)
+          (setvar "dimstyle" oldstyle)
+        )
+        (princ "\n>> Select a simple LINE entity (not a polyline).")
+      )
+    )
+    (princ "\nNo object selected.")
+  )
+  (princ)
+)
+
+;;;-------------------------------------------------------------------------
+;;; PSIZE - leader + blank pipe-size text ("     NB")
+;;;-------------------------------------------------------------------------
+(defun c:PSIZE (/ oldlayer inspt)
+  (setvar "cmdecho" 0)
+  (ensure-layer *LEADER-LAYER*)
+  (setq oldlayer (getvar "clayer"))
+  (setvar "clayer" *LEADER-LAYER*)
+  (princ "\nPick leader start (on pipe), then end point: ")
+  (command "_.leader" pause pause "" "_none")
+  (setq inspt (getvar "lastpoint"))
+  (setvar "clayer" oldlayer)
+  (ensure-layer *TEXT-LAYER*)
+  (setq oldlayer (getvar "clayer"))
+  (setvar "clayer" *TEXT-LAYER*)
+  (command "_.text" inspt *TEXT-HEIGHT* 0 *SIZE-TEXT*)
+  (setvar "clayer" oldlayer)
+  (princ "\n>> Double-click the text to type the actual pipe size.")
+  (princ)
+)
+
+;;;-------------------------------------------------------------------------
+;;; PBEND - leader + blank bend-angle text ("     BEND")
+;;;-------------------------------------------------------------------------
+(defun c:PBEND (/ oldlayer inspt)
+  (setvar "cmdecho" 0)
+  (ensure-layer *LEADER-LAYER*)
+  (setq oldlayer (getvar "clayer"))
+  (setvar "clayer" *LEADER-LAYER*)
+  (princ "\nPick leader start (on bend), then end point: ")
+  (command "_.leader" pause pause "" "_none")
+  (setq inspt (getvar "lastpoint"))
+  (setvar "clayer" oldlayer)
+  (ensure-layer *TEXT-LAYER*)
+  (setq oldlayer (getvar "clayer"))
+  (setvar "clayer" *TEXT-LAYER*)
+  (command "_.text" inspt *TEXT-HEIGHT* 0 *BEND-TEXT*)
+  (setvar "clayer" oldlayer)
+  (princ "\n>> Double-click the text to type the actual bend angle.")
+  (princ)
+)
+
+;;;-------------------------------------------------------------------------
+;;; PANNO - one selection, does centerline + dimension + size leader
+;;;-------------------------------------------------------------------------
+(defun c:PANNO (/ ent pts p1 p2 vec len uvec ep1 ep2 oldlayer oldstyle oldlts inspt)
+  (setvar "cmdecho" 0)
+  (setq ent (car (entsel "\nSelect pipe line to fully annotate: ")))
+  (if ent
+    (progn
+      (setq pts (get-endpoints ent))
+      (if pts
+        (progn
+          (setq p1 (car pts) p2 (cadr pts))
+          (setq len (distance p1 p2))
+          (setq vec (mapcar '- p2 p1))
+          (setq uvec (mapcar '(lambda (x) (/ x len)) vec))
+          (setq ep1 (mapcar '- p1 (mapcar '(lambda (x) (* x *CL-EXTEND*)) uvec)))
+          (setq ep2 (mapcar '+ p2 (mapcar '(lambda (x) (* x *CL-EXTEND*)) uvec)))
+
+          ;; centerline
+          (ensure-cl-layer)
+          (setq oldlayer (getvar "clayer"))
+          (setq oldlts (getvar "ltscale"))
+          (setvar "clayer" *CL-LAYER*)
+          (setvar "ltscale" *CL-LTSCALE*)
+          (command "_.line" ep1 ep2 "")
+          (setvar "ltscale" oldlts)
+
+          ;; dimension
+          (ensure-layer *DIM-LAYER*)
+          (setq oldstyle (getvar "dimstyle"))
+          (setvar "clayer" *DIM-LAYER*)
+          (if (tblsearch "DIMSTYLE" *DIMSTYLE*) (setvar "dimstyle" *DIMSTYLE*))
+          (princ "\nPick dimension line location: ")
+          (command "_.dimlinear" p1 p2 pause)
+          (setvar "dimstyle" oldstyle)
+
+          ;; leader + blank size text
+          (ensure-layer *LEADER-LAYER*)
+          (setvar "clayer" *LEADER-LAYER*)
+          (princ "\nPick leader start, then end point for pipe size: ")
+          (command "_.leader" pause pause "" "_none")
+          (setq inspt (getvar "lastpoint"))
+          (ensure-layer *TEXT-LAYER*)
+          (setvar "clayer" *TEXT-LAYER*)
+          (command "_.text" inspt *TEXT-HEIGHT* 0 *SIZE-TEXT*)
+
+          (setvar "clayer" oldlayer)
+          (princ "\n>> Done. Double-click text to enter the pipe size.")
+        )
+        (princ "\n>> Select a simple LINE entity (not a polyline).")
+      )
+    )
+    (princ "\nNo object selected.")
+  )
+  (princ)
+)
+
+(princ "\nPipeAnno loaded. Commands: PCL  PDIM  PSIZE  PBEND  PANNO")
+(princ)
