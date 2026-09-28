@@ -1,0 +1,363 @@
+;;; TXT2XL.lsp - Universal AutoCAD text -> Excel exporter
+;;; Command: TXT2XL   (alias: TB2XL)
+;;;
+;;; Reads: TEXT, MTEXT, TABLE, block ATTRIBUTES, text inside blocks (nested),
+;;;        DIMENSION text, MULTILEADER text.
+;;; Grid:  uses LINE / LWPOLYLINE / POLYLINE borders (also inside blocks) to
+;;;        build rows & columns. If no borders are selected, it groups text
+;;;        by position (approximate).
+;;; Output: opens Excel directly (all cells as text). If Excel is not
+;;;        available, saves a CSV file instead.
+
+(vl-load-com)
+
+;;; ---------- helpers ----------
+(defun tx:rep (s a b / p st)
+  (setq st 0)
+  (while (setq p (vl-string-search a s st))
+    (setq s  (strcat (substr s 1 p) b (substr s (+ p (strlen a) 1)))
+          st (+ p (strlen b))))
+  s)
+
+(defun tx:g (ed k / v) (if (setq v (cdr (assoc k ed))) v 0))
+
+(defun tx:hex (s / n)
+  (setq n 0)
+  (foreach ch (vl-string->list (strcase s))
+    (setq n (+ (* n 16) (if (> ch 64) (- ch 55) (- ch 48)))))
+  n)
+
+;; remove MTEXT formatting codes
+(defun tx:strip (s / out i n ch nx p)
+  (setq out "" i 1 n (strlen s))
+  (while (<= i n)
+    (setq ch (substr s i 1))
+    (cond
+      ((= ch "\\")
+       (setq nx (if (< i n) (substr s (1+ i) 1) ""))
+       (cond
+         ((= nx "P") (setq out (strcat out " ") i (+ i 2)))
+         ((member nx '("f" "F" "H" "h" "C" "c" "A" "a" "Q" "q" "W" "w" "T" "t" "p"))
+          (setq p (vl-string-search ";" s (1- i)))
+          (setq i (if p (+ p 2) (1+ n))))
+         ((= nx "S")
+          (setq p (vl-string-search ";" s (1- i)))
+          (if p
+            (progn
+              (setq out (strcat out (tx:rep (tx:rep (substr s (+ i 2) (- p i 1)) "^" "/") "#" "/")))
+              (setq i (+ p 2)))
+            (setq i (1+ n))))
+         ((and (= nx "U") (= (substr s (+ i 2) 1) "+"))
+          (setq p (tx:hex (substr s (+ i 3) 4)))
+          (setq out (strcat out (if (and (> p 0) (< p 256)) (chr p) "?")) i (+ i 7)))
+         ((member nx '("L" "l" "O" "o" "K" "k")) (setq i (+ i 2)))
+         ((= nx "~") (setq out (strcat out " ") i (+ i 2)))
+         ((member nx '("\\" "{" "}")) (setq out (strcat out nx) i (+ i 2)))
+         (t (setq i (1+ i)))))
+      ((or (= ch "{") (= ch "}")) (setq i (1+ i)))
+      (t (setq out (strcat out ch) i (1+ i)))))
+  out)
+
+(defun tx:clean (s)
+  (if (or (null s) (/= (type s) 'STR))
+    ""
+    (progn
+      (setq s (tx:strip s))
+      (setq s (tx:rep s "%%d" (chr 176)))
+      (setq s (tx:rep s "%%D" (chr 176)))
+      (setq s (tx:rep s "%%c" (chr 216)))
+      (setq s (tx:rep s "%%C" (chr 216)))
+      (setq s (tx:rep s "%%p" (chr 177)))
+      (setq s (tx:rep s "%%P" (chr 177)))
+      (setq s (tx:rep s "%%u" ""))
+      (setq s (tx:rep s "%%U" ""))
+      (setq s (tx:rep s "%%o" ""))
+      (setq s (tx:rep s "%%O" ""))
+      (vl-string-trim " " s))))
+
+(defun tx:q (s) (strcat "\"" (tx:rep s "\"" "\"\"") "\""))
+
+(defun tx:join (lst d / s)
+  (setq s "")
+  (foreach x lst (setq s (if (= s "") x (strcat s d x))))
+  s)
+
+;; sorted unique values (ascending), merged within tol
+(defun tx:uniq (lst tol / out)
+  (foreach v (vl-sort lst '<)
+    (if (or (null out) (> (abs (- v (car out))) tol))
+      (setq out (cons v out))))
+  (reverse out))
+
+;; index i where lst[i] <= v < lst[i+1]
+(defun tx:idx (v lst tol / n res)
+  (setq n 0)
+  (while (and (null res) (< n (1- (length lst))))
+    (if (and (>= v (- (nth n lst) tol)) (< v (- (nth (1+ n) lst) tol)))
+      (setq res n))
+    (setq n (1+ n)))
+  res)
+
+;;; ---------- transforms: m = (a b c d dx dy) ----------
+(defun tx:pt (m p)
+  (list (+ (* (nth 0 m) (car p)) (* (nth 1 m) (cadr p)) (nth 4 m))
+        (+ (* (nth 2 m) (car p)) (* (nth 3 m) (cadr p)) (nth 5 m))))
+
+(defun tx:mul (p c)
+  (list (+ (* (nth 0 p) (nth 0 c)) (* (nth 1 p) (nth 2 c)))
+        (+ (* (nth 0 p) (nth 1 c)) (* (nth 1 p) (nth 3 c)))
+        (+ (* (nth 2 p) (nth 0 c)) (* (nth 3 p) (nth 2 c)))
+        (+ (* (nth 2 p) (nth 1 c)) (* (nth 3 p) (nth 3 c)))
+        (+ (* (nth 0 p) (nth 4 c)) (* (nth 1 p) (nth 5 c)) (nth 4 p))
+        (+ (* (nth 2 p) (nth 4 c)) (* (nth 3 p) (nth 5 c)) (nth 5 p))))
+
+;;; ---------- collectors (globals) ----------
+(defun tx:addtxt (pt str h m / p sc)
+  (setq str (tx:clean str))
+  (if (/= str "")
+    (progn
+      (setq p  (tx:pt m pt)
+            sc (sqrt (abs (- (* (nth 0 m) (nth 3 m)) (* (nth 1 m) (nth 2 m))))))
+      (setq *tx:txts* (cons (list (car p) (cadr p) str) *tx:txts*))
+      (if (and h (> h 0)) (setq *tx:hs* (cons (* h sc) *tx:hs*))))))
+
+(defun tx:seg (p1 p2 m)
+  (setq p1 (tx:pt m p1) p2 (tx:pt m p2))
+  (cond
+    ((< (abs (- (cadr p1) (cadr p2))) 0.01)
+     (if (> (abs (- (car p1) (car p2))) 0.01)
+       (setq *tx:ys* (cons (cadr p1) *tx:ys*))))
+    ((< (abs (- (car p1) (car p2))) 0.01)
+     (setq *tx:xs* (cons (car p1) *tx:xs*)))))
+
+(defun tx:segs (pts m / k)
+  (setq k 0)
+  (while (< k (1- (length pts)))
+    (tx:seg (nth k pts) (nth (1+ k) pts) m)
+    (setq k (1+ k))))
+
+(defun tx:cadd (r c str / key old)
+  (setq key (cons r c) old (assoc key *tx:cells*))
+  (if old
+    (setq *tx:cells* (subst (cons key (strcat (cdr old) " " str)) old *tx:cells*))
+    (setq *tx:cells* (cons (cons key str) *tx:cells*))))
+
+;;; ---------- entity processor (recursive for blocks) ----------
+(defun tx:proc (en m depth / ed typ pt str h pts nm bd bp sx sy rot ip mm sub s2 meas)
+  (setq ed (entget en) typ (cdr (assoc 0 ed)))
+  (cond
+    ;; single-line text / attributes
+    ((or (= typ "TEXT") (= typ "ATTRIB"))
+     (if (zerop (logand 1 (tx:g ed 70)))
+       (progn
+         (setq pt (if (or (/= 0 (tx:g ed 72)) (/= 0 (tx:g ed 73)) (/= 0 (tx:g ed 74)))
+                    (cdr (assoc 11 ed))
+                    (cdr (assoc 10 ed))))
+         (tx:addtxt pt (cdr (assoc 1 ed)) (cdr (assoc 40 ed)) m))))
+
+    ;; multiline text
+    ((= typ "MTEXT")
+     (setq str "")
+     (foreach a ed (if (= (car a) 3) (setq str (strcat str (cdr a)))))
+     (setq str (strcat str (if (cdr (assoc 1 ed)) (cdr (assoc 1 ed)) "")))
+     (tx:addtxt (cdr (assoc 10 ed)) str (cdr (assoc 40 ed)) m))
+
+    ;; dimension text
+    ((= typ "DIMENSION")
+     (setq str  (cdr (assoc 1 ed))
+           meas (rtos (tx:g ed 42) 2 (getvar "DIMDEC")))
+     (setq str (cond ((or (null str) (= str "") (= str "<>")) meas)
+                     (t (tx:rep str "<>" meas))))
+     (if (cdr (assoc 11 ed)) (tx:addtxt (cdr (assoc 11 ed)) str 0 m)))
+
+    ;; multileader text
+    ((= typ "MULTILEADER")
+     (if (and (cdr (assoc 304 ed)) (cdr (assoc 12 ed)))
+       (tx:addtxt (cdr (assoc 12 ed)) (cdr (assoc 304 ed)) (cdr (assoc 40 ed)) m)))
+
+    ;; borders
+    ((= typ "LINE")
+     (tx:seg (cdr (assoc 10 ed)) (cdr (assoc 11 ed)) m))
+
+    ((= typ "LWPOLYLINE")
+     (setq pts (mapcar 'cdr (vl-remove-if-not '(lambda (a) (= (car a) 10)) ed)))
+     (if (and pts (= 1 (logand 1 (tx:g ed 70)))) (setq pts (append pts (list (car pts)))))
+     (tx:segs pts m))
+
+    ((= typ "POLYLINE")
+     (setq pts nil sub (entnext en))
+     (while (and sub (/= "SEQEND" (cdr (assoc 0 (setq s2 (entget sub))))))
+       (if (= "VERTEX" (cdr (assoc 0 s2))) (setq pts (cons (cdr (assoc 10 s2)) pts)))
+       (setq sub (entnext sub)))
+     (setq pts (reverse pts))
+     (if (and pts (= 1 (logand 1 (tx:g ed 70)))) (setq pts (append pts (list (car pts)))))
+     (tx:segs pts m))
+
+    ;; blocks: attributes + block contents
+    ((= typ "INSERT")
+     ;; attributes of this insert
+     (if (= 1 (tx:g ed 66))
+       (progn
+         (setq sub (entnext en))
+         (while (and sub (/= "SEQEND" (cdr (assoc 0 (entget sub)))))
+           (tx:proc sub m depth)
+           (setq sub (entnext sub)))))
+     ;; block definition contents
+     (setq nm  (cdr (assoc 2 ed))
+           ip  (cdr (assoc 10 ed))
+           sx  (if (cdr (assoc 41 ed)) (cdr (assoc 41 ed)) 1.0)
+           sy  (if (cdr (assoc 42 ed)) (cdr (assoc 42 ed)) 1.0)
+           rot (if (cdr (assoc 50 ed)) (cdr (assoc 50 ed)) 0.0))
+     (if (and (< depth 8)
+              (setq bd (tblsearch "BLOCK" nm))
+              (zerop (logand 4 (tx:g bd 70))))          ; skip xrefs
+       (progn
+         (setq bp (cdr (assoc 10 bd)))
+         (setq mm (list (* sx (cos rot)) (* -1.0 sy (sin rot))
+                        (* sx (sin rot)) (* sy (cos rot)) 0.0 0.0))
+         (setq mm (list (nth 0 mm) (nth 1 mm) (nth 2 mm) (nth 3 mm)
+                        (- (car ip)  (+ (* (nth 0 mm) (car bp)) (* (nth 1 mm) (cadr bp))))
+                        (- (cadr ip) (+ (* (nth 2 mm) (car bp)) (* (nth 3 mm) (cadr bp))))))
+         (setq mm (tx:mul m mm))
+         (setq sub (cdr (assoc -2 bd)))
+         (while sub
+           (if (not (member (cdr (assoc 0 (entget sub))) '("ATTRIB" "ATTDEF" "VERTEX" "SEQEND")))
+             (tx:proc sub mm (1+ depth)))
+           (setq sub (entnext sub))))))))
+
+;;; ---------- output ----------
+(defun tx:excel (mat / xl wb ws cl r c res)
+  (setq res
+    (vl-catch-all-apply
+      '(lambda ( / rw v)
+         (setq xl (vlax-get-or-create-object "Excel.Application"))
+         (vla-put-Visible xl :vlax-true)
+         (setq wb (vlax-invoke-method (vlax-get-property xl 'Workbooks) 'Add))
+         (setq ws (vlax-get-property xl 'ActiveSheet))
+         (setq cl (vlax-get-property ws 'Cells))
+         (vlax-put-property cl 'NumberFormat "@")
+         (setq r 1)
+         (foreach rw mat
+           (setq c 1)
+           (foreach v rw
+             (if (/= v "")
+               (vlax-put-property (vlax-get-property cl 'Item r c) 'Value2 v))
+             (setq c (1+ c)))
+           (setq r (1+ r)))
+         (vlax-invoke-method (vlax-get-property ws 'Columns) 'AutoFit)
+         t)))
+  (foreach o (list cl ws wb xl)
+    (if (and o (= (type o) 'VLA-OBJECT) (not (vlax-object-released-p o)))
+      (vlax-release-object o)))
+  (not (vl-catch-all-error-p res)))
+
+(defun tx:csv (mat / fname f)
+  (setq fname (getfiled "Save CSV file" (strcat (getvar "DWGPREFIX") "TextExport") "csv" 1))
+  (if fname
+    (progn
+      (setq f (open fname "w"))
+      (foreach rw mat (write-line (tx:join (mapcar 'tx:q rw) ",") f))
+      (close f)
+      (prompt (strcat "\nSaved: " fname))
+      (startapp "explorer.exe" (strcat "\"" fname "\"")))))
+
+;;; ---------- main ----------
+(defun c:TXT2XL ( / ss i en ed tbls mat avgh tol txs xs ys nrows ncols r c
+                    obj nr nc cs rw skipped anchor placed starts prev xsorted p)
+  (setq *tx:txts* nil *tx:hs* nil *tx:xs* nil *tx:ys* nil *tx:cells* nil mat nil)
+  (prompt "\nSelect table / text / blocks / dimensions (include the border lines for a grid): ")
+  (setq ss (ssget '((0 . "TEXT,MTEXT,INSERT,DIMENSION,MULTILEADER,TABLE,LINE,LWPOLYLINE,POLYLINE"))))
+  (if (null ss)
+    (prompt "\nNothing selected.")
+    (progn
+      ;; collect
+      (setq i 0)
+      (repeat (sslength ss)
+        (setq en (ssname ss i) i (1+ i))
+        (if (= "TABLE" (cdr (assoc 0 (entget en))))
+          (setq tbls (cons en tbls))
+          (tx:proc en '(1.0 0.0 0.0 1.0 0.0 0.0) 0)))
+
+      ;; TABLE objects
+      (foreach en (reverse tbls)
+        (setq obj (vlax-ename->vla-object en)
+              nr  (vla-get-Rows obj)
+              nc  (vla-get-Columns obj)
+              r 0)
+        (while (< r nr)
+          (setq c 0 rw nil)
+          (while (< c nc)
+            (setq cs (vl-catch-all-apply 'vla-GetText (list obj r c)))
+            (if (or (vl-catch-all-error-p cs) (/= (type cs) 'STR)) (setq cs ""))
+            (setq rw (cons (tx:clean cs) rw) c (1+ c)))
+          (setq mat (append mat (list (reverse rw))) r (1+ r)))
+        (setq mat (append mat (list nil))))
+
+      ;; loose text (grid or clustered)
+      (if *tx:txts*
+        (progn
+          (setq avgh (if *tx:hs* (/ (apply '+ *tx:hs*) (length *tx:hs*)) 2.5))
+          (setq tol  (max 0.01 (* 0.2 avgh)))
+          (setq txs  (vl-sort *tx:txts*
+                       '(lambda (a b)
+                          (if (> (abs (- (cadr a) (cadr b))) (* 0.3 avgh))
+                            (> (cadr a) (cadr b))
+                            (< (car a) (car b))))))
+          (setq xs (tx:uniq *tx:xs* tol)
+                ys (tx:uniq *tx:ys* tol)
+                skipped 0)
+          (if (and (> (length xs) 2) (> (length ys) 2))
+            ;; --- grid from border lines ---
+            (progn
+              (setq nrows (1- (length ys)) ncols (1- (length xs)))
+              (foreach tx txs
+                (setq c (tx:idx (car tx) xs tol)
+                      r (tx:idx (cadr tx) ys tol))
+                (if (and c r)
+                  (tx:cadd (- nrows 1 r) c (caddr tx))
+                  (setq skipped (1+ skipped)))))
+            ;; --- no grid: cluster by position ---
+            (progn
+              (setq r -1 anchor nil placed nil)
+              (foreach tx txs
+                (if (or (null anchor) (> (abs (- anchor (cadr tx))) (* 0.6 avgh)))
+                  (setq r (1+ r) anchor (cadr tx)))
+                (setq placed (cons (list r (car tx) (caddr tx)) placed)))
+              (setq nrows (1+ r))
+              (setq xsorted (vl-sort (mapcar 'car txs) '<) starts nil prev nil)
+              (foreach x xsorted
+                (if (or (null prev) (> (- x prev) (* 3.0 avgh)))
+                  (setq starts (cons x starts)))
+                (setq prev x))
+              (setq starts (reverse starts) ncols (length starts))
+              (foreach p placed
+                (setq c -1)
+                (foreach s starts
+                  (if (<= s (+ (cadr p) 0.001)) (setq c (1+ c))))
+                (tx:cadd (car p) c (caddr p)))))
+          ;; matrix
+          (setq r 0)
+          (while (< r nrows)
+            (setq c 0 rw nil)
+            (while (< c ncols)
+              (setq rw (cons (if (assoc (cons r c) *tx:cells*)
+                               (cdr (assoc (cons r c) *tx:cells*))
+                               "")
+                             rw)
+                    c (1+ c)))
+            (setq mat (append mat (list (reverse rw))) r (1+ r)))
+          (if (> skipped 0)
+            (prompt (strcat "\n" (itoa skipped) " text item(s) were outside the table grid and skipped.")))))
+
+      ;; output
+      (cond
+        ((null mat) (prompt "\nNo text found."))
+        ((tx:excel mat) (prompt "\nExported to Excel."))
+        (t (prompt "\nExcel not available - saving CSV instead.")
+           (tx:csv mat)))))
+  (princ))
+
+(defun c:TB2XL () (c:TXT2XL))
+
+(prompt "\nTXT2XL loaded. Type TXT2XL to export any text/table to Excel.")
+(princ)
